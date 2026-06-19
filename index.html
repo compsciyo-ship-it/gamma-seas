@@ -1,0 +1,376 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
+<title>GAMMA SEAS - GEX Dealer Flow (data-driven)</title>
+<style>
+  *{box-sizing:border-box} html,body{margin:0;height:100%}
+  body{background:#05060e;color:#eef3ff;font-family:"Courier New",ui-monospace,monospace;
+    display:flex;flex-direction:column;align-items:center;gap:13px;padding:18px 12px 28px;min-height:100%}
+  h1{font-size:clamp(16px,4.2vw,26px);letter-spacing:3px;margin:2px 0 0;
+    background:linear-gradient(#ffe79a,#f8b800,#e06a2a);-webkit-background-clip:text;background-clip:text;color:transparent;
+    text-transform:uppercase;filter:drop-shadow(0 0 6px rgba(248,184,0,.35))}
+  .sub{font-size:11px;letter-spacing:1px;color:#8aa0c8;margin:-6px 0 2px;text-transform:uppercase}
+  .stage{position:relative;width:min(96vw,760px);aspect-ratio:320/200;border:3px solid #161d33;border-radius:6px;
+    overflow:hidden;box-shadow:0 0 0 2px #000,0 10px 30px rgba(0,0,0,.7),inset 0 0 40px rgba(0,0,0,.4);background:#000}
+  canvas{width:100%;height:100%;display:block;image-rendering:auto}
+  .scan{position:absolute;inset:0;pointer-events:none;mix-blend-mode:overlay;
+    background:repeating-linear-gradient(to bottom,rgba(0,0,0,0) 0 2px,rgba(0,0,0,.28) 2px 3px);opacity:.45}
+  .vig{position:absolute;inset:0;pointer-events:none;box-shadow:inset 0 0 70px 6px rgba(0,0,0,.45)}
+  .controls{display:flex;flex-wrap:wrap;gap:10px;justify-content:center;width:min(96vw,760px)}
+  button.k{font-family:inherit;font-weight:bold;text-transform:uppercase;letter-spacing:1px;font-size:12px;
+    color:#1a1208;border:none;border-radius:5px;padding:10px 13px;cursor:pointer;
+    background:linear-gradient(#ffe08a,#f8b800);box-shadow:0 4px 0 #7a5a00,0 6px 10px rgba(0,0,0,.4)}
+  button.k:active{transform:translateY(3px);box-shadow:0 1px 0 #7a5a00}
+  button.k.up{background:linear-gradient(#bfe9ff,#3cbcfc);box-shadow:0 4px 0 #1c6aa0,0 6px 10px rgba(0,0,0,.4);color:#06283a}
+  button.k.down{background:linear-gradient(#ffd0c8,#fc7460);box-shadow:0 4px 0 #8a2e22,0 6px 10px rgba(0,0,0,.4);color:#3a0f08}
+  button.k.ghost{background:linear-gradient(#2a3760,#19223e);color:#cfe0ff;box-shadow:0 4px 0 #0c1124,0 6px 10px rgba(0,0,0,.4)}
+  .legend{width:min(96vw,760px);display:grid;grid-template-columns:repeat(4,1fr);gap:8px;font-size:10.5px;letter-spacing:.5px}
+  .legend div{background:linear-gradient(#121a33,#0b1124);border:1px solid #243154;border-radius:4px;padding:7px 8px;text-transform:uppercase}
+  .legend b{color:#f8b800}
+  .hint{font-size:11px;color:#7184ad;letter-spacing:.5px;text-align:center;max-width:720px}
+  code{color:#bfe9ff}
+  @media (max-width:520px){.legend{grid-template-columns:repeat(2,1fr)}}
+  @media (prefers-reduced-motion:reduce){.scan{display:none}}
+</style>
+</head>
+<body>
+  <h1>Gamma Seas</h1>
+  <div class="sub">real price in - dealer hedge out</div>
+
+  <div class="stage" id="stage">
+    <canvas id="c" width="640" height="400"></canvas>
+    <div class="scan"></div><div class="vig"></div>
+  </div>
+
+  <div class="controls">
+    <button class="k ghost" id="pause">&#10073;&#10073; Pause Feed</button>
+    <button class="k up" id="tu">Test Tick &#9650;</button>
+    <button class="k down" id="td">Test Tick &#9660;</button>
+    <button class="k ghost" id="mute">&#9834; Sound: On</button>
+  </div>
+
+  <div class="hint">Feed it live data from your own code: <code>GammaSeas.setGEXProfile([{price,gex},...])</code> then <code>GammaSeas.pushPrice(p)</code> on every tick. With no feed it runs a demo walk. Dealer hedge = &minus;GEX(spot) &times; &Delta;price.</div>
+
+  <div class="legend">
+    <div><b>Waterline</b> = spot price</div>
+    <div><b>Right panel</b> = live GEX profile</div>
+    <div><b>Toss packet</b> = sell (it floats)</div>
+    <div><b>Net a packet</b> = buy (scoop it back)</div>
+  </div>
+
+<script>
+(()=>{
+  const c=document.getElementById('c'), x=c.getContext('2d');
+  const W=320,H=200; x.imageSmoothingEnabled=true;
+
+  const FONT={' ':["00000","00000","00000","00000","00000"],
+    'A':["01110","10001","11111","10001","10001"],'B':["11110","10001","11110","10001","11110"],
+    'C':["01111","10000","10000","10000","01111"],'D':["11110","10001","10001","10001","11110"],
+    'E':["11111","10000","11110","10000","11111"],'F':["11111","10000","11110","10000","10000"],
+    'G':["01111","10000","10011","10001","01111"],'H':["10001","10001","11111","10001","10001"],
+    'I':["11111","00100","00100","00100","11111"],'J':["00111","00010","00010","10010","01100"],
+    'K':["10001","10010","11100","10010","10001"],'L':["10000","10000","10000","10000","11111"],
+    'M':["10001","11011","10101","10001","10001"],'N':["10001","11001","10101","10011","10001"],
+    'O':["01110","10001","10001","10001","01110"],'P':["11110","10001","11110","10000","10000"],
+    'Q':["01110","10001","10101","10010","01101"],'R':["11110","10001","11110","10010","10001"],
+    'S':["01111","10000","01110","00001","11110"],'T':["11111","00100","00100","00100","00100"],
+    'U':["10001","10001","10001","10001","01110"],'V':["10001","10001","10001","01010","00100"],
+    'W':["10001","10001","10101","11011","10001"],'X':["10001","01010","00100","01010","10001"],
+    'Y':["10001","01010","00100","00100","00100"],'Z':["11111","00010","00100","01000","11111"],
+    '0':["01110","10011","10101","11001","01110"],'1':["00100","01100","00100","00100","01110"],
+    '2':["01110","10001","00110","01000","11111"],'3':["11110","00001","00110","00001","11110"],
+    '4':["00010","00110","01010","11111","00010"],'5':["11111","10000","11110","00001","11110"],
+    '6':["01110","10000","11110","10001","01110"],'7':["11111","00001","00010","00100","01000"],
+    '8':["01110","10001","01110","10001","01110"],'9':["01110","10001","01111","00001","01110"],
+    ':':["00000","00100","00000","00100","00000"],'+':["00000","00100","01110","00100","00000"],
+    '-':["00000","00000","01110","00000","00000"],'.':["00000","00000","00000","00000","00100"],
+    '!':["00100","00100","00100","00000","00100"],'(':["00010","00100","00100","00100","00010"],
+    ')':["01000","00100","00100","00100","01000"],'▲':["00000","00100","01110","11111","00000"],
+    '▼':["00000","11111","01110","00100","00000"],'?':["01110","10001","00110","00000","00100"]};
+  function drawText(px,py,str,col,sc){sc=sc||1;x.fillStyle=col;let cx=Math.round(px);const cy=Math.round(py);
+    str=String(str).toUpperCase();for(let i=0;i<str.length;i++){const g=FONT[str[i]]||FONT['?'];
+      for(let r=0;r<5;r++){const row=g[r];for(let k=0;k<5;k++){if(row[k]==='1')x.fillRect(cx+k*sc,cy+r*sc,sc,sc);}}cx+=6*sc;}}
+  function label(px,py,s,col,sc){drawText(px,py,s,col,sc||1);}
+  function rect(px,py,w,h,col){x.fillStyle=col;x.fillRect(px,py,w,h);}
+
+  const COL={seam:'#f8b8f8',amber:'#f8b800',skin:'#f8c898',skinSh:'#d89860',vest:'#26303f',vestHi:'#3c4a5e',
+    strap:'#0e1014',plate:'#cfd6e0',cap:'#c81818',capDark:'#800000',deck:'#d8843c',deckLite:'#f0b070',bagTie:'#a85a18',foam:'#d6f6ff'};
+
+  // ============ DATA MODEL: GEX profile + price feed ============
+  // demo profile: net dealer GEX (in $B gamma) by price. Real data replaces this.
+  function demoGex(p){ return 2.0*(Math.exp(-Math.pow((p-110)/6,2)) - Math.exp(-Math.pow((p-90)/6,2))); }
+  let gexFn=demoGex;
+  let priceMin=80, priceMax=124;
+  let flipPrice=100, pinPrice=110, putWallPrice=90, gexMaxAbs=2;
+
+  function gexCurve(p){ p=Math.max(priceMin,Math.min(priceMax,p)); return gexFn(p); }
+  function recalcLevels(){
+    let bestPos=-1e9,bestNeg=1e9,pinP=priceMin,putP=priceMax,prev=null,flipP=(priceMin+priceMax)/2,mx=0;
+    for(let p=priceMin;p<=priceMax;p+=0.5){ const g=gexFn(p);
+      if(g>bestPos){bestPos=g;pinP=p;} if(g<bestNeg){bestNeg=g;putP=p;}
+      if(Math.abs(g)>mx)mx=Math.abs(g);
+      const s=g>=0?1:-1; if(prev!==null&&s!==prev)flipP=p; prev=s; }
+    pinPrice=pinP; putWallPrice=putP; flipPrice=flipP; gexMaxAbs=mx||1;
+  }
+  recalcLevels();
+
+  const topY=20, rangeH=()=> (188-topY-4);
+  const bedTop=188;
+  function yForPrice(p){ return topY + (priceMax-p)/(priceMax-priceMin)*rangeH(); }
+
+  // ---- live state ----
+  let dispPrice=102, targetPrice=102, lastFedPrice=null;
+  let hedgeSign=0, hedgeMag=0, lastHedge=0, hedgePressure=0, tossCooldown=0;
+  let t=0, shockRipple=0, rippleT=0, bags=[], splashes=[], floaters=[], netAct=null;
+  let dealerPose='idle', poseTimer=0, flash=0, caption='', captionT=0;
+  let lastFeedMs=performance.now(), liveMs=-1e9, paused=false;
+  const boatX=150, boatHalf=30;
+  const aboveFlip=()=> dispPrice>flipPrice;            // positive-GEX regime at spot
+  const waterMeanY=()=> yForPrice(dispPrice);
+  function surfaceY(px){ let s=waterMeanY(); s+=1.5*Math.sin(px*0.07+t*2.2)+0.6*Math.sin(px*0.17-t*1.5);
+    if(shockRipple>0.4){const dist=Math.abs(px-boatX);s+=shockRipple*Math.sin(dist*0.18-rippleT*6)*Math.exp(-dist*0.012);}return s;}
+
+  function setCaption(s){caption=s;captionT=70;}
+
+  // ---- the core: a new price tick -> dealer hedge reaction ----
+  function feedPrice(p, isDemo){
+    const now=performance.now();
+    if(!isDemo) liveMs=now;
+    const prev = (lastFedPrice==null)? p : lastFedPrice;
+    const dS = p-prev;
+    const g  = gexCurve(p);              // GEX at spot
+    const hedge = -g*dS;                 // + => dealer BUYS, - => dealer SELLS
+    if(Math.abs(dS)>1e-4){
+      hedgeSign = hedge>0?1:(hedge<0?-1:0);
+      hedgeMag  = Math.min(1, Math.abs(hedge)/0.55);
+      lastHedge = hedge;
+      hedgePressure = Math.min(3, hedgePressure + 0.4 + hedgeMag*1.3);
+      shockRipple = Math.min(9, 3+hedgeMag*7); rippleT=0;
+      if(g<0 && dS<0) { flash=Math.max(flash,5); }
+    }
+    targetPrice=p; lastFedPrice=p; lastFeedMs=now;
+  }
+  // public API
+  window.GammaSeas={
+    pushPrice:(p)=>feedPrice(+p,false),
+    setGEXProfile:(pts)=>{ if(!pts||!pts.length)return;
+      const a=pts.map(o=>({price:+o.price,gex:+o.gex})).sort((m,n)=>m.price-n.price);
+      priceMin=a[0].price-2; priceMax=a[a.length-1].price+2;
+      gexFn=(p)=>{ if(p<=a[0].price)return a[0].gex; if(p>=a[a.length-1].price)return a[a.length-1].gex;
+        for(let i=0;i<a.length-1;i++){ if(p>=a[i].price&&p<=a[i+1].price){ const f=(p-a[i].price)/(a[i+1].price-a[i].price); return a[i].gex+f*(a[i+1].gex-a[i].gex);} } return 0; };
+      recalcLevels(); },
+    reset:()=>{ gexFn=demoGex; priceMin=80; priceMax=124; recalcLevels(); }
+  };
+
+  // ---- demo price walk (used only when no live feed) ----
+  let demoP=102, demoV=0;
+  function demoTick(){ demoV=demoV*0.82 + (100-demoP)*0.012 + (Math.random()-0.5)*0.7;
+    if(Math.random()<0.05) demoV+=(Math.random()-0.5)*3.2;
+    demoP=Math.max(priceMin+1,Math.min(priceMax-1,demoP+demoV)); feedPrice(demoP,true); }
+
+  // ---- audio ----
+  let actx=null,muted=false;
+  function ensureAudio(){if(!actx){try{actx=new (window.AudioContext||window.webkitAudioContext)();}catch(e){}}}
+  function blip(f,dur,type,vol,slide){if(muted||!actx)return;type=type||'square';vol=vol||0.06;slide=slide||0;
+    const o=actx.createOscillator(),g=actx.createGain();o.type=type;o.frequency.value=f;
+    if(slide)o.frequency.linearRampToValueAtTime(f+slide,actx.currentTime+dur);
+    g.gain.value=vol;g.gain.exponentialRampToValueAtTime(0.0008,actx.currentTime+dur);
+    o.connect(g).connect(actx.destination);o.start();o.stop(actx.currentTime+dur);}
+  function tossBag(){const hx=boatX-10,hy=surfaceY(boatX)-22;
+    bags.push({x:hx,y:hy,vx:-(1.0+Math.random()*0.6),vy:-1.7-Math.random()*0.7,gone:false});blip(620,.07,'square',.05,-180);}
+  function startNet(){ if(!floaters.length)return false; let bi=0,bd=1e9;
+    for(let i=0;i<floaters.length;i++){const dd=Math.abs(floaters[i].x-boatX);if(dd<bd){bd=dd;bi=i;}}
+    netAct={phase:0,target:floaters[bi],hasBag:false}; blip(180,.1,'triangle',.05,80); return true; }
+
+  document.getElementById('pause').onclick=function(){paused=!paused;this.textContent=(paused?'▶ Resume Feed':'❚❚ Pause Feed');};
+  document.getElementById('tu').onclick=()=>{ensureAudio();feedPrice(dispPrice+0.8,false);};
+  document.getElementById('td').onclick=()=>{ensureAudio();feedPrice(dispPrice-0.8,false);};
+  const muteBtn=document.getElementById('mute');
+  muteBtn.onclick=()=>{muted=!muted;muteBtn.textContent='♪ Sound: '+(muted?'Off':'On');ensureAudio();};
+
+  let last=performance.now();
+  function step(now){
+    let dt=(now-last)/16.67;last=now;if(dt>3)dt=3;t+=0.016*dt;
+    const live = (now-liveMs)<3000;
+    if(!paused && !live && (now-lastFeedMs)>900) demoTick();
+
+    dispPrice += (targetPrice-dispPrice)*0.12*dt;
+    if(shockRipple>0){shockRipple-=0.16*dt;rippleT+=dt;}
+    if(flash>0)flash-=dt; if(captionT>0)captionT-=dt;
+    hedgePressure=Math.max(0,hedgePressure-0.03*dt);
+
+    if(netAct){ dealerPose='net'; }
+    else if(hedgePressure>0.2 && hedgeSign!==0){
+      if(hedgeSign<0){ dealerPose='toss'; tossCooldown-=dt;
+        if(tossCooldown<=0){ tossBag(); poseTimer=10; tossCooldown=Math.max(3,9-hedgeMag*7); } }
+      else { dealerPose='reach'; tossCooldown-=dt;
+        if(tossCooldown<=0){ if(startNet())tossCooldown=Math.max(8,14-hedgeMag*6); else tossCooldown=12; } }
+    } else if(poseTimer<=0) dealerPose='idle';
+    if(poseTimer>0)poseTimer-=dt;
+
+    for(const bg of bags){bg.x+=bg.vx*dt;bg.y+=bg.vy*dt;bg.vy+=0.13*dt;const sy=surfaceY(bg.x);
+      if(bg.y>=sy&&!bg.gone){bg.gone=true;splashes.push({x:bg.x,y:sy,life:10});blip(360,.06,'square',.04,-160);
+        if(floaters.length<16)floaters.push({x:bg.x,vx:(Math.random()-0.5)*0.05,bob:Math.random()*6.28});}}
+    bags=bags.filter(b=>!b.gone&&b.y<H+10);
+    for(const f of floaters){f.x+=f.vx*dt;f.bob+=0.08*dt;}
+    floaters=floaters.filter(f=>f.x>-8&&f.x<W+8);
+    if(netAct){ netAct.phase+=0.055*dt;
+      if(!netAct.hasBag&&netAct.phase>=0.5){netAct.hasBag=true;const ix=floaters.indexOf(netAct.target);
+        if(ix>=0)floaters.splice(ix,1);splashes.push({x:netAct.target.x,y:surfaceY(netAct.target.x),life:8});blip(440,.08,'square',.05,120);}
+      if(netAct.phase>=1)netAct=null; }
+    for(const s of splashes)s.life-=dt; splashes=splashes.filter(s=>s.life>0);
+    draw(now);requestAnimationFrame(step);
+  }
+
+  // ============ rendering ============
+  function drawSky(){
+    const g=x.createLinearGradient(0,0,0,bedTop);
+    g.addColorStop(0,'#140a30');g.addColorStop(0.42,'#3a1e63');g.addColorStop(0.72,'#8a3a72');g.addColorStop(1,'#f0805a');
+    x.fillStyle=g;x.fillRect(0,0,W,H);
+    for(let i=0;i<26;i++){const sx=(i*53)%W,sy=(i*29)%42;const tw=0.4+0.6*Math.abs(Math.sin(t*2+i));
+      x.fillStyle='rgba(255,255,255,'+(0.4*tw).toFixed(2)+')';x.fillRect(sx,sy,1,1);}
+    const sunX=264,sunY=48;let rg=x.createRadialGradient(sunX,sunY,2,sunX,sunY,72);
+    rg.addColorStop(0,'rgba(255,242,205,0.9)');rg.addColorStop(0.25,'rgba(255,180,95,0.42)');rg.addColorStop(1,'rgba(255,120,60,0)');
+    x.fillStyle=rg;x.fillRect(sunX-72,sunY-72,144,144);
+    let dg=x.createRadialGradient(sunX-3,sunY-3,1,sunX,sunY,12);dg.addColorStop(0,'#fff6d8');dg.addColorStop(1,'#f7a83e');
+    x.fillStyle=dg;x.beginPath();x.arc(sunX,sunY,11,0,7);x.fill();
+  }
+  function cloudBlob(cx,cy,a){x.fillStyle='rgba(244,228,255,'+a+')';
+    x.beginPath();x.ellipse(cx,cy,22,7,0,0,7);x.ellipse(cx+14,cy-3,14,6,0,0,7);x.ellipse(cx-12,cy+2,12,5,0,0,7);x.fill();}
+  function drawClouds(){for(let i=0;i<3;i++){const bx=((i*120+t*(5+i*4))%(W+90))-45;cloudBlob(bx,18+i*9,0.16+i*0.04);}}
+
+  function drawWater(){
+    const top=waterMeanY();
+    const g=x.createLinearGradient(0,top-6,0,bedTop);
+    g.addColorStop(0,'#7fe8ff');g.addColorStop(0.12,'#2fb0f0');g.addColorStop(0.42,'#0f66cc');g.addColorStop(0.72,'#06337a');g.addColorStop(1,'#03163e');
+    x.fillStyle=g;x.beginPath();x.moveTo(0,surfaceY(0));
+    for(let px=0;px<=W;px+=3)x.lineTo(px,surfaceY(px));x.lineTo(W,bedTop);x.lineTo(0,bedTop);x.closePath();x.fill();
+    x.strokeStyle='rgba(225,250,255,0.85)';x.lineWidth=1;x.beginPath();x.moveTo(0,surfaceY(0));
+    for(let px=0;px<=W;px+=3)x.lineTo(px,surfaceY(px));x.stroke();
+    const sx=264;for(let i=0;i<14;i++){const yy=top+5+i*6;if(yy>bedTop-2)break;const wob=Math.sin(t*3+i*0.9)*6,a=0.20*(1-i/14);
+      x.fillStyle='rgba(255,236,175,'+a.toFixed(3)+')';x.fillRect(sx-10+wob,yy,20,2);}
+    for(let px=0;px<W;px+=7){if(Math.floor(t*20+px)%3===0){const sy=surfaceY(px);x.fillStyle='rgba(255,255,255,0.55)';x.fillRect(px,sy-1,2,1);}}
+    const fy=yForPrice(flipPrice);
+    const dgr=x.createLinearGradient(0,fy,0,bedTop);const pulse=0.10+0.05*Math.sin(t*4);
+    dgr.addColorStop(0,'rgba(160,0,30,0)');dgr.addColorStop(1,'rgba(180,0,30,'+(0.24+pulse).toFixed(3)+')');
+    x.fillStyle=dgr;x.fillRect(0,fy,W,bedTop-fy);
+    rect(0,bedTop,W,H-bedTop,'#2a1808');rect(0,bedTop,W,2,'#4a2e14');
+  }
+  function drawReflection(){const wl=surfaceY(boatX);x.save();x.beginPath();x.rect(0,wl,W,bedTop-wl);x.clip();
+    x.globalAlpha=0.18;x.translate(Math.sin(t*3)*1.5,2*wl);x.scale(1,-1);drawBoatAndDealer(true);x.restore();x.globalAlpha=1;}
+
+  function drawGEX(){
+    const x0=250,x1=314,cx=283,maxLen=29;
+    x.fillStyle='rgba(8,12,28,0.5)';x.fillRect(x0,14,x1-x0,bedTop-14);
+    rect(x0,14,x1-x0,1,'rgba(255,255,255,0.18)');label(x0+5,18,'GEX',COL.amber);
+    x.fillStyle='rgba(255,255,255,0.18)';x.fillRect(cx,26,1,bedTop-28);
+    for(let yy=27;yy<bedTop-1;yy+=1){ const p=priceMax-((yy-topY)/rangeH())*(priceMax-priceMin);
+      if(p<priceMin||p>priceMax)continue; const gg=gexCurve(p);const len=Math.max(0,Math.min(maxLen,Math.abs(gg)/gexMaxAbs*maxLen));
+      if(gg>=0){x.fillStyle='rgba(70,225,130,0.8)';x.fillRect(cx,yy,len,1);}else{x.fillStyle='rgba(235,75,75,0.8)';x.fillRect(cx-len,yy,len,1);} }
+    // spot pointer on the profile
+    const wy=Math.round(waterMeanY());rect(x0,wy,x1-x0,1,'rgba(188,252,255,0.5)');
+  }
+  function glowH(y,core,glow){x.fillStyle=glow;x.fillRect(0,y-2,W,5);
+    for(let xx=0;xx<W;xx+=8){if(Math.floor((xx+t*40)/4)%2===0){x.fillStyle=core;x.fillRect(xx,y,5,1);}}}
+  function drawPriceAxisY(){x.fillStyle='rgba(8,12,28,0.5)';x.fillRect(0,14,22,bedTop-14);
+    rect(22,14,1,bedTop-14,'rgba(255,255,255,0.18)');
+    const span=priceMax-priceMin, stepP= span>40?10:(span>16?5:2);
+    for(let p=Math.ceil(priceMin/stepP)*stepP;p<=priceMax;p+=stepP){const yy=Math.round(yForPrice(p));if(yy<16||yy>bedTop-2)continue;
+      rect(18,yy,4,1,'#e8d8b0');label(2,yy-2,String(Math.round(p)),'#efe0b6');}}
+
+  function drawSpot(){const wy=Math.round(waterMeanY());
+    x.fillStyle='rgba(150,250,255,0.16)';x.fillRect(24,wy-1,222,3);
+    for(let xx=24;xx<246;xx+=5)rect(xx,wy,3,1,'#bcfcff');rect(boatX-1,wy-1,2,2,'#ffffff');
+    const lbl='SPOT '+dispPrice.toFixed(1),w=lbl.length*6;let lx=26,ly=Math.max(13,Math.min(bedTop-9,wy-4));
+    const tg=x.createLinearGradient(0,ly-1,0,ly+8);tg.addColorStop(0,'#ff6a4e');tg.addColorStop(1,'#b81e10');
+    x.fillStyle=tg;x.fillRect(lx-2,ly-1,w+4,9);rect(lx-2,ly-1,w+4,1,'#ffae96');label(lx,ly,lbl,'#ffffff');}
+
+  function drawBag(bx,by){bx=Math.round(bx);by=Math.round(by);
+    x.fillStyle='rgba(0,0,0,0.18)';x.fillRect(bx-2,by+4,7,2);
+    rect(bx-3,by-3,7,7,'#ffffff');rect(bx-3,by+1,7,3,'#d6d6d6');rect(bx-1,by-5,3,2,COL.bagTie);rect(bx-2,by-2,2,2,'#ffffff');rect(bx+1,by-1,1,3,'#ececec');}
+
+  function drawBoatAndDealer(refl){
+    const sy=surfaceY(boatX);const by=Math.round(sy)-2;
+    if(!refl){x.fillStyle='rgba(0,0,30,0.28)';x.beginPath();x.ellipse(boatX,Math.round(sy)+9,boatHalf+6,4,0,0,7);x.fill();}
+    const hg=x.createLinearGradient(0,by,0,by+12);hg.addColorStop(0,'#a85a26');hg.addColorStop(0.5,'#7a3a12');hg.addColorStop(1,'#4a2008');
+    x.fillStyle=hg;x.fillRect(boatX-boatHalf,by,boatHalf*2,12);
+    rect(boatX-boatHalf-5,by+2,5,8,'#6a3010');rect(boatX+boatHalf,by+2,5,8,'#6a3010');rect(boatX-boatHalf,by,boatHalf*2,1,'#cc8244');
+    rect(boatX-boatHalf+3,by-2,boatHalf*2-6,3,COL.deck);rect(boatX-boatHalf+3,by-2,boatHalf*2-6,1,COL.deckLite);
+    const stackN=aboveFlip()?2:3;for(let i=0;i<stackN;i++)drawBag(boatX+boatHalf-9,by-5-i*5);
+    drawDealer(boatX-8,by-2);
+  }
+  function drawDealer(dx,feetY){
+    const top=feetY-20;const panic=(dealerPose==='panic'),toss=(dealerPose==='toss'),haul=(dealerPose==='haul');
+    rect(dx+3,feetY-6,3,6,COL.strap);rect(dx+8,feetY-6,3,6,COL.strap);rect(dx+2,feetY-1,5,2,'#000');rect(dx+8,feetY-1,5,2,'#000');
+    const vg=x.createLinearGradient(dx,top+8,dx+12,top+8);vg.addColorStop(0,COL.vestHi);vg.addColorStop(0.5,COL.vest);vg.addColorStop(1,COL.strap);
+    x.fillStyle=vg;x.fillRect(dx+1,top+8,12,11);rect(dx+1,top+8,12,1,'#48566e');rect(dx+6,top+9,2,9,COL.strap);rect(dx+5,top+12,4,3,COL.plate);
+    rect(dx,top+8,2,3,COL.strap);rect(dx+12,top+8,2,3,COL.strap);
+    rect(dx+4,top+5,6,3,COL.skin);rect(dx+3,top,8,7,COL.skin);rect(dx+10,top,1,7,COL.skinSh);rect(dx+3,top+5,8,1,COL.skinSh);
+    rect(dx+3,top+2,8,2,'#000');rect(dx+4,top+2,1,1,'#cfe8ff');
+    rect(dx+2,top-2,10,3,COL.cap);rect(dx+2,top-2,10,1,'#e85a5a');rect(dx+2,top-1,10,1,COL.capDark);rect(dx+9,top,5,2,COL.cap);
+    rect(dx+5,top+7,4,1,'#ffe070');rect(dx+6,top+7,1,1,'#fff6c8');
+    if(panic){rect(dx-2,top+3,3,6,COL.skin);rect(dx+13,top+3,3,6,COL.skin);rect(dx+4,top+2,2,2,'#000');rect(dx+8,top+2,2,2,'#000');}
+    else if(toss){rect(dx+12,top+2,3,5,COL.skin);rect(dx+13,top-2,3,4,COL.skin);rect(dx-1,top+10,3,5,COL.skin);}
+    else if(dealerPose==='net'||dealerPose==='reach'){rect(dx-5,top+9,5,3,COL.skin);rect(dx+12,top+10,3,6,COL.skin);}
+    else{rect(dx-1,top+10,3,6,COL.skin);rect(dx+12,top+10,3,6,COL.skin);}
+  }
+  function drawFloaters(){
+    for(const f of floaters){const sy=surfaceY(f.x);const yy=sy-2+Math.sin(f.bob)*0.8;
+      x.fillStyle='rgba(0,0,40,0.16)';x.fillRect(Math.round(f.x)-3,Math.round(sy)+2,7,2);
+      drawBag(f.x,yy);
+      x.strokeStyle='rgba(210,246,255,0.4)';x.lineWidth=1;x.beginPath();x.ellipse(f.x,sy+1.5,5,1.4,0,0,7);x.stroke();}
+  }
+  function drawNet(){
+    if(!netAct)return;const sy=surfaceY(boatX);const handX=boatX-7,handY=Math.round(sy)-13;
+    const tgx=netAct.target.x,tgy=surfaceY(netAct.target.x);let tipX,tipY;
+    if(netAct.phase<0.5){const e=netAct.phase/0.5;tipX=handX+(tgx-handX)*e;tipY=handY+(tgy-handY)*e;}
+    else{const e=(netAct.phase-0.5)/0.5;tipX=tgx+(handX-tgx)*e;tipY=tgy+(handY-tgy)*e;}
+    x.strokeStyle='#caa56a';x.lineWidth=1;x.beginPath();x.moveTo(handX,handY);x.lineTo(tipX,tipY);x.stroke();
+    x.strokeStyle='#ececf4';x.beginPath();x.arc(tipX,tipY,4,0,7);x.stroke();
+    x.strokeStyle='rgba(220,220,235,0.55)';x.beginPath();x.moveTo(tipX-3,tipY);x.lineTo(tipX+3,tipY);x.moveTo(tipX,tipY-3);x.lineTo(tipX,tipY+4);x.stroke();
+    if(netAct.hasBag)drawBag(tipX,tipY-1);
+  }
+  function drawBagsAndSplashes(){
+    for(const bg of bags){x.globalAlpha=0.3;drawBag(bg.x-bg.vx*1.6,bg.y-bg.vy*1.6);x.globalAlpha=1;drawBag(bg.x,bg.y);}
+    for(const s of splashes){const a=s.life;x.strokeStyle='rgba(200,245,255,'+(a/14).toFixed(2)+')';x.lineWidth=1;
+      x.beginPath();x.arc(s.x,s.y,(14-a)*1.2,0,7);x.stroke();
+      x.fillStyle='rgba(255,255,255,'+(a/18).toFixed(2)+')';x.beginPath();x.arc(s.x,s.y-2,(14-a)*0.8,0,7);x.fill();
+      rect(s.x-3,s.y-a,2,2,COL.foam);rect(s.x,s.y-a*1.2,2,2,'#fff');}
+  }
+  function drawHUD(now){
+    const pz=aboveFlip(); const g=gexCurve(dispPrice);
+    const grd=x.createLinearGradient(0,0,0,12);grd.addColorStop(0,'rgba(22,28,56,0.94)');grd.addColorStop(1,'rgba(6,9,18,0.94)');
+    x.fillStyle=grd;x.fillRect(0,0,W,12);rect(0,0,W,1,'rgba(130,150,210,0.5)');rect(0,12,W,1,'rgba(0,0,0,0.6)');
+    let act = hedgePressure>0.2 ? (hedgeSign<0?'SELLING':'BUYING') : 'NEUTRAL';
+    label(4,3,pz?'GEX:+':'GEX:-',pz?'#7cff7c':'#ff8a6a');
+    label(46,3,(g>=0?'+':'')+g.toFixed(1)+'B',g>=0?'#7cff7c':'#ff8a6a');
+    label(150,3,'SPOT '+dispPrice.toFixed(1),'#f8d038');
+    label(238,3,act,hedgeSign<0?'#ff8a6a':(hedgeSign>0?'#7cff7c':'#9fb0d0'));
+    // feed status
+    const liveOn=(now-liveMs)<3000;
+    rect(2,bedTop+1,118,10,'rgba(6,9,18,0.6)');
+    label(5,bedTop+3,'FEED: '+(paused?'PAUSED':(liveOn?'LIVE':'DEMO')), liveOn?'#7cff7c':'#c9b6ff');
+    label(196,bedTop+3,'CALL WALL '+Math.round(pinPrice),'#a8eea8');
+    if(captionT>0){const w=caption.length*6;x.fillStyle='rgba(8,11,26,0.0)';label(Math.max(72,(W-w)/2),3,caption,COL.amber);}
+  }
+
+  function draw(now){
+    x.setTransform(2,0,0,2,0,0);
+    drawSky();drawClouds();drawWater();drawReflection();drawGEX();
+    glowH(Math.round(yForPrice(flipPrice)),'#ffc8f8','rgba(248,120,220,0.18)');label(24,Math.round(yForPrice(flipPrice))-8,'FLIP '+Math.round(flipPrice),COL.seam);
+    glowH(Math.round(yForPrice(pinPrice)),'#c8f7c8','rgba(90,230,120,0.12)');
+    label(120,40,'POSITIVE GAMMA','#bfe9ff');label(120,48,'DEALER PINS','#7fb0d8');
+    label(120,150,'NEGATIVE GAMMA','#ffc0b0');label(120,158,'DEALER CHASES','#e07a6a');
+    drawPriceAxisY();drawFloaters();drawBoatAndDealer(false);drawNet();drawSpot();drawBagsAndSplashes();drawHUD(now);
+    if(flash>0){x.fillStyle='rgba(255,80,80,'+(0.07*flash)+')';x.fillRect(0,0,W,H);}
+  }
+
+  recalcLevels();
+  setCaption('FEED PRICES VIA GAMMASEAS.PUSHPRICE');
+  requestAnimationFrame(step);
+})();
+</script>
+</body>
+</html>
